@@ -7,7 +7,10 @@ Repo release-readiness + secret/PII scanner. Tauri v2 desktop app (React + TypeS
 - Redacted previews only. Risk summary + safe-to-upload indicator.
 - Export report: JSON / Markdown / Text (`.txt`) — choose folder and file name.
 
-## Run
+## Download & run (Windows)
+- Download ZIP from GitHub → run `shipcheck.exe` (WebView2 required; debug build).
+
+## Run (dev)
 ```bash
 npm install
 npm run tauri dev      # desktop (recommended)
