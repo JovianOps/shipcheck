@@ -5,7 +5,7 @@
   "identifier": "com.shipcheck.app",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://127.0.0.1:1420",
+    "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -14,5 +14,5 @@
     "windows": [{ "title": "shipcheck", "width": 1180, "height": 780 }],
     "security": { "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost" }
   },
-  "bundle": { "active": false, "targets": "all", "icon": [] }
+  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.ico"] }
 }

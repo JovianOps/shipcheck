@@ -4,7 +4,8 @@ Repo release-readiness + secret/PII scanner (Tauri desktop app). Offline by defa
 
 ## Download & run (Windows)
 1. Download ZIP: https://github.com/JovianOps/shipcheck/archive/refs/heads/main.zip
-2. Extract and run `shipcheck.exe` (WebView2 required; debug build).
+2. Extract — keep `shipcheck.exe` **and** `WebView2Loader.dll` together in the same folder.
+3. Run `shipcheck.exe`. Requires the Microsoft Edge WebView2 Runtime installed on the PC.
 
 ## What it does
 - Scans a folder for secrets/PII (heuristic) and readiness checks (LICENSE, README, CI, `.gitignore`).
@@ -19,5 +20,5 @@ Repo release-readiness + secret/PII scanner (Tauri desktop app). Offline by defa
 ```bash
 npm install
 npm run tauri dev
-# build: npx tauri build --debug  (use CARGO_BUILD_JOBS=1 if rustc crashes)
+# build: npx tauri build   (use CARGO_BUILD_JOBS=1 if rustc crashes)
 ```
