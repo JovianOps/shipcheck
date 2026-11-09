@@ -1,91 +1,71 @@
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
-import { open, save } from '@tauri-apps/plugin-dialog';
-import { parseExportResult, parseProgress, parseScanResult } from './guards';
-import { sanitizePreview } from './redact';
-import type { ExportResult, ReportFormat, ScanOptions, ScanProgress, ScanResult } from './types';
+import type { ExportResult, ReportFormat, ScanOptions, ScanProgress, ScanResult } from "./types";
+import { parseExportResult, parseProgress, parseScanResult } from "./guards";
+import { mockIpc } from "./mock";
 
-const PROGRESS_EVENT = 'shipcheck://progress';
+export const PROGRESS_EVENT = "shipcheck://progress";
 
-export function isTauri(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+const isTauri = () =>
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in (window as unknown as Record<string, unknown>);
+
+function backend() {
+  if (isTauri()) return null;
+  if (import.meta.env.DEV) return mockIpc;
+  throw new Error("Tauri runtime not available.");
 }
 
-async function loadMock(): Promise<typeof import('./mock')> {
-  if (import.meta.env.DEV) {
-    return import('./mock');
-  }
-  throw new Error('Tauri runtime is not available.');
+async function invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke(cmd, args);
 }
 
-/** Converts any thrown value to a short, redacted, display-safe message. */
-export function toMessage(error: unknown): string {
-  let raw = '';
-  if (typeof error === 'string') {
-    raw = error;
-  } else if (error instanceof Error) {
-    raw = error.message;
-  } else if (typeof error === 'object' && error !== null && 'message' in error) {
-    const message = (error as { message?: unknown }).message;
-    if (typeof message === 'string') raw = message;
-  }
-  return sanitizePreview(raw, 300) || 'Unexpected error.';
-}
-
-export async function pickDirectory(): Promise<string | null> {
-  if (!isTauri()) {
-    return (await loadMock()).mockPickDirectory();
-  }
-  const selected = await open({ directory: true, multiple: false, title: 'Select repository folder' });
-  return typeof selected === 'string' && selected.length > 0 ? selected : null;
-}
-
-export async function scanRepo(
-  path: string,
-  options: ScanOptions,
-  onProgress: (progress: ScanProgress) => void,
-  signal: AbortSignal,
-): Promise<ScanResult> {
-  if (!isTauri()) {
-    const mock = await loadMock();
-    return parseScanResult(await mock.mockScan(path, options, onProgress, signal));
-  }
-  let unlisten: (() => void) | undefined;
-  try {
-    unlisten = await listen<unknown>(PROGRESS_EVENT, (event) => {
-      const progress = parseProgress(event.payload);
-      if (progress) onProgress(progress);
-    });
-    const raw = await invoke<unknown>('scan_repo', { path, options });
-    return parseScanResult(raw);
-  } finally {
-    unlisten?.();
-  }
+export async function scanRepo(path: string, options: ScanOptions): Promise<ScanResult> {
+  const mock = backend();
+  const raw = mock ? await mock.scanRepo(path, options) : await invoke("scan_repo", { path, options });
+  const parsed = parseScanResult(raw);
+  if (!parsed) throw new Error("Backend returned an invalid scan result.");
+  return parsed;
 }
 
 export async function cancelScan(): Promise<void> {
-  if (!isTauri()) return;
-  await invoke<void>('cancel_scan');
-}
-
-export async function pickSavePath(format: ReportFormat, defaultName: string): Promise<string | null> {
-  if (!isTauri()) {
-    return (await loadMock()).mockSavePath(format, defaultName);
-  }
-  const extension = format === 'json' ? 'json' : format === 'markdown' ? 'md' : 'txt';
-  const name = format === 'json' ? 'JSON' : format === 'markdown' ? 'Markdown' : 'Text';
-  const selected = await save({
-    title: 'Export report — choose folder and file name',
-    defaultPath: defaultName,
-    filters: [{ name, extensions: [extension] }],
-  });
-  return typeof selected === 'string' && selected.length > 0 ? selected : null;
+  const mock = backend();
+  if (mock) return mock.cancelScan();
+  await invoke("cancel_scan");
 }
 
 export async function exportReport(scanId: string, format: ReportFormat, destPath: string): Promise<ExportResult> {
-  if (!isTauri()) {
-    return parseExportResult(await (await loadMock()).mockExport(scanId, format, destPath));
-  }
-  const raw = await invoke<unknown>('export_report', { scanId, format, destPath });
-  return parseExportResult(raw);
+  const mock = backend();
+  const raw = mock ? await mock.exportReport(scanId, format, destPath) : await invoke("export_report", { scanId, format, destPath });
+  const parsed = parseExportResult(raw);
+  if (!parsed) throw new Error("Backend returned an invalid export result.");
+  return parsed;
+}
+
+export async function onProgress(cb: (p: ScanProgress) => void): Promise<() => void> {
+  const mock = backend();
+  if (mock) return mock.onProgress((raw) => { const p = parseProgress(raw); if (p) cb(p); });
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<unknown>(PROGRESS_EVENT, (e) => { const p = parseProgress(e.payload); if (p) cb(p); });
+}
+
+export async function pickFolder(): Promise<string | null> {
+  const mock = backend();
+  if (mock) return mock.pickFolder();
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const res = await open({ directory: true, multiple: false, title: "Select project folder" });
+  return typeof res === "string" ? res : null;
+}
+
+const EXT: Record<ReportFormat, { ext: string; name: string }> = {
+  json: { ext: "json", name: "JSON" },
+  markdown: { ext: "md", name: "Markdown" },
+  txt: { ext: "txt", name: "Text" },
+};
+
+export async function pickSavePath(format: ReportFormat): Promise<string | null> {
+  const { ext, name } = EXT[format];
+  const mock = backend();
+  if (mock) return mock.pickSavePath(ext);
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const res = await save({ title: "Export report", defaultPath: `shipcheck-report.${ext}`, filters: [{ name, extensions: [ext] }] });
+  return typeof res === "string" ? res : null;
 }

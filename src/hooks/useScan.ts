@@ -1,89 +1,40 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { cancelScan, scanRepo, toMessage } from '../ipc';
-import type { ScanOptions, ScanProgress, ScanResult, ScanStatus } from '../types';
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ScanOptions, ScanProgress, ScanResult } from "../types";
+import { cancelScan, onProgress, scanRepo } from "../ipc";
 
-export interface UseScan {
-  status: ScanStatus;
-  progress: ScanProgress | null;
-  result: ScanResult | null;
-  usedOptions: ScanOptions | null;
-  error: string | null;
-  start: (path: string, options: ScanOptions) => Promise<void>;
-  cancel: () => void;
-}
-
-export function useScan(): UseScan {
-  const [status, setStatus] = useState<ScanStatus>('idle');
-  const [progress, setProgress] = useState<ScanProgress | null>(null);
+export function useScan() {
   const [result, setResult] = useState<ScanResult | null>(null);
-  const [usedOptions, setUsedOptions] = useState<ScanOptions | null>(null);
+  const [progress, setProgress] = useState<ScanProgress | null>(null);
+  const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const runId = useRef(0);
 
-  const controllerRef = useRef<AbortController | null>(null);
-  const pendingProgress = useRef<ScanProgress | null>(null);
-  const frameRef = useRef(0);
-
-  const flushProgress = useCallback((next: ScanProgress): void => {
-    pendingProgress.current = next;
-    if (frameRef.current) return;
-    frameRef.current = requestAnimationFrame(() => {
-      frameRef.current = 0;
-      if (pendingProgress.current) setProgress(pendingProgress.current);
-    });
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let alive = true;
+    onProgress((p) => setProgress(p)).then((u) => { if (alive) unlisten = u; else u(); }).catch(() => {});
+    return () => { alive = false; unlisten?.(); };
   }, []);
 
-  useEffect(
-    () => () => {
-      controllerRef.current?.abort();
-      if (frameRef.current) cancelAnimationFrame(frameRef.current);
-    },
-    [],
-  );
-
-  const start = useCallback(
-    async (path: string, options: ScanOptions): Promise<void> => {
-      if (controllerRef.current) return;
-      const controller = new AbortController();
-      controllerRef.current = controller;
-      setStatus('scanning');
-      setError(null);
-      setResult(null);
-      setProgress({ scanned: 0, total: 0, currentFile: null });
-      try {
-        const next = await scanRepo(path, options, flushProgress, controller.signal);
-        if (controller.signal.aborted) {
-          setStatus('idle');
-          return;
-        }
-        setResult(next);
-        setUsedOptions(options);
-        setStatus('done');
-      } catch (e) {
-        if (controller.signal.aborted) {
-          setStatus('idle');
-        } else {
-          setError(toMessage(e));
-          setStatus('error');
-        }
-      } finally {
-        if (frameRef.current) {
-          cancelAnimationFrame(frameRef.current);
-          frameRef.current = 0;
-        }
-        pendingProgress.current = null;
-        if (controllerRef.current === controller) controllerRef.current = null;
-      }
-    },
-    [flushProgress],
-  );
-
-  const cancel = useCallback((): void => {
-    const controller = controllerRef.current;
-    if (!controller) return;
-    setStatus('cancelling');
-    controller.abort();
-    void cancelScan().catch(() => undefined);
+  const start = useCallback(async (path: string, options: ScanOptions) => {
+    const id = ++runId.current;
+    setScanning(true); setError(null); setResult(null); setProgress(null);
+    try {
+      const r = await scanRepo(path, options);
+      if (id === runId.current) setResult(r);
+    } catch (e) {
+      if (id === runId.current) setError(e instanceof Error ? e.message : "Scan failed.");
+    } finally {
+      if (id === runId.current) setScanning(false);
+    }
   }, []);
 
-  return { status, progress, result, usedOptions, error, start, cancel };
+  const cancel = useCallback(async () => {
+    runId.current++;
+    setScanning(false);
+    setError("Scan cancelled.");
+    try { await cancelScan(); } catch { /* ignore */ }
+  }, []);
+
+  return { result, progress, scanning, error, start, cancel };
 }

@@ -6,7 +6,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
-use std::time::Instant;
 use tauri::{AppHandle, Emitter, State};
 use walkdir::WalkDir;
 
@@ -17,11 +16,11 @@ struct Store { last: Mutex<Option<ScanResult>> }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ScanOptions { readiness: bool, secrets_pii: bool, respect_ignore: bool }
+struct ScanOptions { readiness: bool, secrets: bool }
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct ScanProgress { scanned: u64, total: u64, current_file: Option<String> }
+struct ScanProgress { scanned: u64, total: u64, current_file: String }
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -29,11 +28,11 @@ struct Finding { id: String, category: String, severity: String, #[serde(rename=
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct ScanSummary { passed: u32, failed: u32, risk_score: u32 }
+struct ScanSummary { safe_to_upload: bool, risk_score: u32, passed: u32, failed: u32, files_scanned: u64 }
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct ScanResult { scan_id: String, repo_path: String, started_at: String, finished_at: String, duration_ms: u64, files_scanned: u64, summary: ScanSummary, findings: Vec<Finding>, truncated: bool, invalid_findings: u32 }
+struct ScanResult { scan_id: String, path: String, summary: ScanSummary, findings: Vec<Finding> }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,8 +161,6 @@ fn do_scan(app: &AppHandle, state: &State<'_, AppState>, path: String, options: 
     state.cancel.store(false, Ordering::SeqCst);
     let root = PathBuf::from(&path);
     if !root.is_dir() { return Err("Selected path is not a directory.".into()); }
-    let started = Instant::now();
-    let started_at = Utc::now().to_rfc3339();
     let mut findings: Vec<Finding> = Vec::new();
     let mut idn: u64 = 0;
     let mut truncated = false;
@@ -173,19 +170,19 @@ fn do_scan(app: &AppHandle, state: &State<'_, AppState>, path: String, options: 
         if state.cancel.load(Ordering::SeqCst) { break; }
         if e.file_type().is_file() {
             let p = e.path();
-            if options.respect_ignore && is_ignored(p, &root) { continue; }
+            if is_ignored(p, &root) { continue; }
             if let Ok(m) = e.metadata() { if m.len() > 2_000_000 { continue; } }
             files.push(p.to_path_buf());
         }
     }
     let total = files.len() as u64;
-    let rs = if options.secrets_pii { rules() } else { vec![] };
+    let rs = if options.secrets { rules() } else { vec![] };
 
     for (i, p) in files.iter().enumerate() {
         if state.cancel.load(Ordering::SeqCst) { break; }
         let rel = p.strip_prefix(&root).unwrap_or(p).to_string_lossy().replace('\\',"/");
-        let _ = app.emit("shipcheck://progress", ScanProgress { scanned: (i as u64)+1, total, current_file: Some(rel.clone()) });
-        if options.secrets_pii {
+        let _ = app.emit("shipcheck://progress", ScanProgress { scanned: (i as u64)+1, total, current_file: rel.clone() });
+        if options.secrets {
             if let Ok(text) = fs::read_to_string(p) {
                 for (ln, line) in text.lines().enumerate().take(50000) {
                     for (re, cat, sev, typ, rid, rem) in &rs {
@@ -219,15 +216,13 @@ fn do_scan(app: &AppHandle, state: &State<'_, AppState>, path: String, options: 
     for f in &findings { failed_rules.insert(f.rule_id.clone()); }
     let sum: i32 = findings.iter().map(|f| match f.severity.as_str() { "critical"=>10,"high"=>6,"medium"=>3,"low"=>1,_=>0 }).sum();
     let risk = (100.0*(1.0 - (- (sum as f64)/60.0).exp())) as u32;
+    let safe = findings.iter().all(|f| f.severity != "critical" && f.severity != "high");
 
     Ok(ScanResult {
-        scan_id: format!("scan-{}", started_at.replace(|c:char| !c.is_ascii_alphanumeric(), "")),
-        repo_path: root.to_string_lossy().to_string(),
-        started_at, finished_at: Utc::now().to_rfc3339(),
-        duration_ms: started.elapsed().as_millis() as u64,
-        files_scanned: files.len() as u64,
-        summary: ScanSummary { passed, failed: failed_rules.len() as u32, risk_score: risk.min(100) },
-        findings, truncated, invalid_findings: 0,
+        scan_id: format!("scan-{}", Utc::now().to_rfc3339().replace(|c:char| !c.is_ascii_alphanumeric(), "")),
+        path: root.to_string_lossy().to_string(),
+        summary: ScanSummary { safe_to_upload: safe, risk_score: risk.min(100), passed, failed: failed_rules.len() as u32, files_scanned: files.len() as u64 },
+        findings,
     })
 }
 
@@ -244,13 +239,13 @@ fn export_report(scan_id: String, format: String, dest_path: String, store: Stat
     let r = guard.as_ref().ok_or("No scan")?;
     if r.scan_id != scan_id { return Err("No matching scan to export.".into()); }
     let body = if format == "json" {
-        serde_json::to_string_pretty(&serde_json::json!({"tool":"shipcheck","scanId":r.scan_id,"repoPath":r.repo_path,"summary":r.summary,"findings":r.findings})).map_err(|e| e.to_string())?
+        serde_json::to_string_pretty(&serde_json::json!({"tool":"shipcheck","scanId":r.scan_id,"path":r.path,"summary":r.summary,"findings":r.findings})).map_err(|e| e.to_string())?
     } else if format == "txt" {
-        let mut s = format!("shipcheck report\nRepository: {}\nRisk score: {}/100\nPassed/Failed: {}/{}\nFindings: {}\n\nAll secret and PII values are redacted.\n\n", r.repo_path, r.summary.risk_score, r.summary.passed, r.summary.failed, r.findings.len());
+        let mut s = format!("shipcheck report\nPath: {}\nRisk score: {}/100\nPassed/Failed: {}/{}\nFindings: {}\n\nAll secret and PII values are redacted.\n\n", r.path, r.summary.risk_score, r.summary.passed, r.summary.failed, r.findings.len());
         for f in &r.findings { s.push_str(&format!("[{}] {}\n{}:{}\nPreview: {}\nFix: {}\n\n", f.severity.to_uppercase(), f.type_, f.file, f.line, f.preview, f.remediation)); }
         s
     } else {
-        let mut s = format!("# shipcheck report\n\n- Repository: `{}`\n- Risk score: {}/100\n- Passed/Failed: {}/{}\n- Findings: {}\n\n> All secret and PII values are redacted.\n\n", r.repo_path, r.summary.risk_score, r.summary.passed, r.summary.failed, r.findings.len());
+        let mut s = format!("# shipcheck report\n\n- Path: `{}`\n- Risk score: {}/100\n- Passed/Failed: {}/{}\n- Findings: {}\n\n> All secret and PII values are redacted.\n\n", r.path, r.summary.risk_score, r.summary.passed, r.summary.failed, r.findings.len());
         for f in &r.findings { s.push_str(&format!("## [{}] {}\n- {}:{}\n- Preview: `{}`\n- Fix: {}\n\n", f.severity.to_uppercase(), f.type_, f.file, f.line, f.preview.replace('`',"'"), f.remediation)); }
         s
     };
